@@ -23,16 +23,21 @@ https://huggingface.co/models?filter=causal-lm
 # You can also adapt this script on your own causal language modeling task. Pointers for this are left as comments.
 
 import argparse
+import os
 import logging
 import math
 import os
+import shutil
 import random
+import regex
 
 import datasets
 import torch
 from datasets import load_dataset
 from torch.utils.data.dataloader import DataLoader
 from tqdm.auto import tqdm
+import glob 
+from datetime import datetime
 
 import transformers
 from accelerate import Accelerator
@@ -48,7 +53,8 @@ from transformers import (
     get_scheduler,
     set_seed,
 )
-
+from tokenizers.processors import BertProcessing, TemplateProcessing
+from torch.utils.tensorboard import SummaryWriter
 
 logger = logging.getLogger(__name__)
 MODEL_CONFIG_CLASSES = list(MODEL_MAPPING.keys())
@@ -84,7 +90,7 @@ def parse_args():
         "--model_name_or_path",
         type=str,
         help="Path to pretrained model or model identifier from huggingface.co/models.",
-        required=True,
+        # required=True,
     )
     parser.add_argument(
         "--config_name",
@@ -170,6 +176,25 @@ def parse_args():
         "--overwrite_cache", type=bool, default=False, help="Overwrite the cached training and evaluation sets"
     )
 
+    parser.add_argument(
+        "--save_steps", type=int, default=500, help="Step to save model checkpoint"
+    )
+    parser.add_argument(
+        "--eval_steps", type=int, default=500, help="Step to evaluate"
+    )
+    parser.add_argument(
+        "--logging_steps", type=int, default=50, help="Step to log"
+    )
+    parser.add_argument(
+        "--log_dir", type=str, default="./runs", help="Log dir"
+    )
+    parser.add_argument(
+        "--ckpt_path", type=str, default="./ckpt", help="Checkpoint path"
+    )
+    parser.add_argument(
+        "--ckpt_limit", type=int, default=5, help="Checkpoint path"
+    )
+
     args = parser.parse_args()
 
     # Sanity checks
@@ -188,9 +213,10 @@ def parse_args():
 
     return args
 
-
 def main():
     args = parse_args()
+
+    writer = SummaryWriter(f"{args.log_dir}/{datetime.now().strftime('%d/%m/%Y-%H:%M:%S')}")
 
     # Initialize the accelerator. We will let the accelerator handle device placement for us in this example.
     accelerator = Accelerator()
@@ -288,19 +314,32 @@ def main():
 
     # Preprocessing the datasets.
     # First we tokenize all the texts.
-    column_names = raw_datasets["train"].column_names
-    text_column_name = "text" if "text" in column_names else column_names[0]
+    # column_names = raw_datasets["train"].column_names
+    # text_column_name = "text" if "text" in column_names else column_names[0]
 
-    def tokenize_function(examples):
-        return tokenizer(examples[text_column_name])
+    # def tokenize_function(examples):
+    #     return tokenizer(examples[text_column_name])
 
-    tokenized_datasets = raw_datasets.map(
-        tokenize_function,
-        batched=True,
-        num_proc=args.preprocessing_num_workers,
-        remove_columns=column_names,
-        load_from_cache_file=not args.overwrite_cache,
-    )
+    # tokenized_datasets = raw_datasets.map(
+    #     tokenize_function,
+    #     batched=True,
+    #     num_proc=args.preprocessing_num_workers,
+    #     remove_columns=column_names,
+    #     load_from_cache_file=not args.overwrite_cache,
+    # )
+
+    # tokenizer._tokenizer.post_processor = BertProcessing(
+    #             (" </s>", tokenizer.convert_tokens_to_ids(" </s>")),
+    #             (" <s>", tokenizer.convert_tokens_to_ids(" <s>")),
+    #         )
+
+    # tokenizer.post_processor = TemplateProcessing(
+    #     single="<s> $A </s>",
+    #     special_tokens=[
+    #         (" </s>", tokenizer.convert_tokens_to_ids(" </s>")), 
+    #         (" <s>", tokenizer.convert_tokens_to_ids(" <s>"))
+    #     ],
+    # )
 
     if args.block_size is None:
         block_size = tokenizer.model_max_length
@@ -341,27 +380,55 @@ def main():
     # To speed up this part, we use multiprocessing. See the documentation of the map method for more information:
     # https://huggingface.co/docs/datasets/package_reference/main_classes.html#datasets.Dataset.map
 
-    lm_datasets = tokenized_datasets.map(
-        group_texts,
-        batched=True,
-        num_proc=args.preprocessing_num_workers,
-        load_from_cache_file=not args.overwrite_cache,
-    )
+    # lm_datasets = tokenized_datasets.map(
+    #     group_texts,
+    #     batched=True,
+    #     num_proc=args.preprocessing_num_workers,
+    #     load_from_cache_file=not args.overwrite_cache,
+    # )
 
-    train_dataset = lm_datasets["train"]
-    eval_dataset = lm_datasets["validation"]
+    # SPECIAL_TOKENS = {
+    #     "pad_token": (" <pad>"),
+    #     "bos_token": (" <s>"),
+    #     "eos_token": (" </s>"),
+    #     "mask_token": (" <mask>"),
+    #     "unk_token": ("")
+    # }
+    SPECIAL_TOKENS = {
+        "pad_token": " <pad>",
+        "eos_token": " </s>",
+        "unk_token": " </s>",
+    }
+
+    tokenizer.add_special_tokens(SPECIAL_TOKENS)
+
+    def custom_batching_collate_fn(batch):
+        result = tokenizer.batch_encode_plus([item["text"] + " </s>" for item in batch], return_tensors="pt", padding="longest", truncation=True, max_length=512)
+        
+        result["labels"] = result["input_ids"].detach().clone()
+        return result
+
+    train_dataset = raw_datasets["train"]
+    eval_dataset = raw_datasets["validation"]
 
     # Log a few random samples from the training set:
     for index in random.sample(range(len(train_dataset)), 3):
         logger.info(f"Sample {index} of the training set: {train_dataset[index]}.")
+    
 
     # DataLoaders creation:
     train_dataloader = DataLoader(
-        train_dataset, shuffle=True, collate_fn=default_data_collator, batch_size=args.per_device_train_batch_size
+        train_dataset, shuffle=True, collate_fn=custom_batching_collate_fn, batch_size=args.per_device_train_batch_size
     )
     eval_dataloader = DataLoader(
-        eval_dataset, collate_fn=default_data_collator, batch_size=args.per_device_eval_batch_size
+        eval_dataset, collate_fn=custom_batching_collate_fn, batch_size=args.per_device_eval_batch_size
     )
+
+    for item in train_dataloader:
+        print(item)
+        break
+
+    # return
 
     # Optimizer
     # Split weights in two groups, one with weight decay and the other not.
@@ -413,6 +480,23 @@ def main():
     # Only show the progress bar once on each machine.
     progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
     completed_steps = 0
+    
+    def get_oldest_checkpoints(checkpoint_paths: list):
+        if len(checkpoint_paths) == 0:
+            return None
+
+        base_path_span = regex.search("(.*?-)(?=\d+)", checkpoint_paths[0]).span()
+        base_path = checkpoint_paths[0][base_path_span[0]:base_path_span[1]]
+        ckpt_idx = None
+        for path in checkpoint_paths:
+            span = regex.search("(?<=.*?-)(\d+)", path).span()
+            current_idx = int(path[span[0]:span[1]])
+            if ckpt_idx == None or ckpt_idx > current_idx:
+                ckpt_idx = current_idx
+
+        return f"{base_path}{ckpt_idx}"
+    
+    accumulate_loss = 0
 
     for epoch in range(args.num_train_epochs):
         model.train()
@@ -420,6 +504,8 @@ def main():
             outputs = model(**batch)
             loss = outputs.loss
             loss = loss / args.gradient_accumulation_steps
+            accumulate_loss += loss
+
             accelerator.backward(loss)
             if step % args.gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
                 optimizer.step()
@@ -431,23 +517,50 @@ def main():
             if completed_steps >= args.max_train_steps:
                 break
 
-        model.eval()
-        losses = []
-        for step, batch in enumerate(eval_dataloader):
-            with torch.no_grad():
-                outputs = model(**batch)
+            if completed_steps % args.logging_steps == 0:
+                writer.add_scalar("Loss/train", accumulate_loss / args.logging_steps, completed_steps)
+                accumulate_loss = 0
 
-            loss = outputs.loss
-            losses.append(accelerator.gather(loss.repeat(args.per_device_eval_batch_size)))
+            if completed_steps % args.save_steps == 0:
+                if args.output_dir is not None:
+                    accelerator.wait_for_everyone()
+                    unwrapped_model = accelerator.unwrap_model(model)
+                    
+                    current_checkpoints = glob.glob(f"{args.ckpt_path}/checkpoint-*")
+                    print("CURRENT CKPT", current_checkpoints)
+                    # if exceed checkpoint limit
+                    if len(current_checkpoints) >= args.ckpt_limit:
+                        oldest_ckpt_path = get_oldest_checkpoints(current_checkpoints) # to delete
+                        print("Removing", oldest_ckpt_path)
+                        if not (oldest_ckpt_path is None):
+                            shutil.rmtree(oldest_ckpt_path)
 
-        losses = torch.cat(losses)
-        losses = losses[: len(eval_dataset)]
-        try:
-            perplexity = math.exp(torch.mean(losses))
-        except OverflowError:
-            perplexity = float("inf")
+                    unwrapped_model.save_pretrained(os.path.join(args.ckpt_path, f"checkpoint-{completed_steps}"), save_function=accelerator.save)
 
-        logger.info(f"epoch {epoch}: perplexity: {perplexity}")
+            if completed_steps % args.eval_steps == 0:
+                model.eval()
+                losses = []
+                for step, batch in enumerate(eval_dataloader):
+                    with torch.no_grad():
+                        outputs = model(**batch)
+
+                    loss = outputs.loss
+                    losses.append(accelerator.gather(loss.repeat(args.per_device_eval_batch_size)))
+
+                losses = torch.cat(losses)
+                losses = losses[: len(eval_dataset)]
+                try:
+                    perplexity = math.exp(torch.mean(losses))
+                except OverflowError:
+                    perplexity = float("inf")
+                
+                writer.add_scalar("Loss/eval", torch.mean(losses).item(), completed_steps)
+                writer.add_scalar("Perplexity/eval", perplexity, completed_steps)
+
+                logger.info(f"epoch {epoch}: perplexity: {perplexity}")
+            
+
+        
 
     if args.output_dir is not None:
         accelerator.wait_for_everyone()
