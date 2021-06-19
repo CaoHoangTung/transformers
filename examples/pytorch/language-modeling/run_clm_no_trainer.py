@@ -54,7 +54,10 @@ from transformers import (
     set_seed,
 )
 from tokenizers.processors import BertProcessing, TemplateProcessing
+from tokenizers.normalizers import NFC
 from torch.utils.tensorboard import SummaryWriter
+
+nfc_normalizer = NFC()
 
 logger = logging.getLogger(__name__)
 MODEL_CONFIG_CLASSES = list(MODEL_MAPPING.keys())
@@ -395,18 +398,25 @@ def main():
     #     "unk_token": ("")
     # }
     SPECIAL_TOKENS = {
-        "pad_token": " <pad>",
-        "eos_token": " </s>",
-        "unk_token": " </s>",
+        "pad_token": tokenizer.eos_token,
+        "eos_token": tokenizer.eos_token,
+        "unk_token": tokenizer.eos_token,
     }
 
     tokenizer.add_special_tokens(SPECIAL_TOKENS)
 
-    def custom_batching_collate_fn(batch):
-        result = tokenizer.batch_encode_plus([item["text"] + " </s>" for item in batch], return_tensors="pt", padding="longest", truncation=True, max_length=512)
-        
+    def custom_batching_collate_fn_00(batch):
+        result = tokenizer.batch_encode_plus([item["text"] + tokenizer.eos_token for item in batch], return_tensors="pt", padding="longest", truncation=True, max_length=512)
+
         result["labels"] = result["input_ids"].detach().clone()
         return result
+
+    def custom_batching_collate_fn(batch):
+        result = tokenizer.batch_encode_plus([nfc_normalizer.normalize_str(item["text"] + tokenizer.eos_token) for item in batch], return_tensors="pt", padding="longest", truncation=True, max_length=512)
+
+        result["labels"] = result["input_ids"].detach().clone()
+        return result
+
 
     train_dataset = raw_datasets["train"]
     eval_dataset = raw_datasets["validation"]
@@ -519,6 +529,7 @@ def main():
 
             if completed_steps % args.logging_steps == 0:
                 writer.add_scalar("Loss/train", accumulate_loss / args.logging_steps, completed_steps)
+                writer.add_scalar("lr/train", lr_scheduler.get_last_lr()[0], completed_steps)
                 accumulate_loss = 0
 
             if completed_steps % args.save_steps == 0:

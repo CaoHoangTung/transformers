@@ -1,5 +1,5 @@
-export MODEL_DIR=/mnt/1T/work/uet_lab/transformers/examples/pytorch/language-modeling/gpt2-vn
-export DATA_PATH=/mnt/1T/work/uet_lab/transformers/examples/pytorch/language-modeling/data
+export MODEL_DIR=/data.local/all/tungch/gpt2-vn/transformers/examples/pytorch/language-modeling/gpt2-vn
+export DATA_PATH=/data.local/all/tungch/text-corpus
 export CUDA_VISIBLE_DEVICES=0
 
 python ./run_clm_no_trainer.py \
@@ -7,8 +7,8 @@ python ./run_clm_no_trainer.py \
 --model_type="gpt2" \
 --config_name=$MODEL_DIR \
 --tokenizer_name=$MODEL_DIR \
---train_file=$DATA_PATH/voz-text-100.txt \
---validation_file=$DATA_PATH/voz-text-100.txt \
+--train_file=$DATA_PATH/voz-text-100-test.txt \
+--validation_file=$DATA_PATH/voz-text-100-test.txt \
 --block_size="512" \
 --per_device_train_batch_size="1" \
 --per_device_eval_batch_size="1" \
@@ -16,9 +16,9 @@ python ./run_clm_no_trainer.py \
 --gradient_accumulation_steps="1" \
 --weight_decay="0.01" \
 --num_warmup_steps="100" \
---num_train_epochs="100" \
+--num_train_epochs="70" \
 --logging_steps="50" \
---log_dir="/mnt/1T/work/uet_lab/transformers/examples/pytorch/language-modeling/gpt2-vn/runs" \
---save_steps="500" \
---eval_steps="500" \
---ckpt_path="/mnt/1T/work/uet_lab/transformers/examples/pytorch/language-modeling/gpt2-vn/ckpt"
+--log_dir="./gpt2-vn/runs" \
+--save_steps="200" \
+--eval_steps="200" \
+--ckpt_path="./gpt2-vn/ckpt"
