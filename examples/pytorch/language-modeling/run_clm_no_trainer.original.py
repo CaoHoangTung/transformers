@@ -113,6 +113,12 @@ def parse_args():
         help="If passed, will use a slow tokenizer (not backed by the 🤗 Tokenizers library).",
     )
     parser.add_argument(
+        "--add_prefix_space",
+        type=bool,
+        default="True",
+        help="If set to True, add prefix space to tokenizer"
+    )
+    parser.add_argument(
         "--per_device_train_batch_size",
         type=int,
         default=8,
@@ -294,9 +300,9 @@ def main():
         logger.warning("You are instantiating a new config instance from scratch.")
 
     if args.tokenizer_name:
-        tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name, use_fast=not args.use_slow_tokenizer)
+        tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name, use_fast=not args.use_slow_tokenizer, add_prefix_space=args.add_prefix_space)
     elif args.model_name_or_path:
-        tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, use_fast=not args.use_slow_tokenizer)
+        tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, use_fast=not args.use_slow_tokenizer, add_prefix_space=args.add_prefix_space)
     else:
         raise ValueError(
             "You are instantiating a new tokenizer from scratch. This is not supported by this script."
@@ -317,19 +323,19 @@ def main():
 
     # Preprocessing the datasets.
     # First we tokenize all the texts.
-    # column_names = raw_datasets["train"].column_names
-    # text_column_name = "text" if "text" in column_names else column_names[0]
+    column_names = raw_datasets["train"].column_names
+    text_column_name = "text" if "text" in column_names else column_names[0]
 
-    # def tokenize_function(examples):
-    #     return tokenizer(examples[text_column_name])
+    def tokenize_function(examples):
+        return tokenizer(examples[text_column_name])
 
-    # tokenized_datasets = raw_datasets.map(
-    #     tokenize_function,
-    #     batched=True,
-    #     num_proc=args.preprocessing_num_workers,
-    #     remove_columns=column_names,
-    #     load_from_cache_file=not args.overwrite_cache,
-    # )
+    tokenized_datasets = raw_datasets.map(
+        tokenize_function,
+        batched=True,
+        num_proc=args.preprocessing_num_workers,
+        remove_columns=column_names,
+        load_from_cache_file=not args.overwrite_cache,
+    )
 
     # tokenizer._tokenizer.post_processor = BertProcessing(
     #             (" </s>", tokenizer.convert_tokens_to_ids(" </s>")),
@@ -383,12 +389,12 @@ def main():
     # To speed up this part, we use multiprocessing. See the documentation of the map method for more information:
     # https://huggingface.co/docs/datasets/package_reference/main_classes.html#datasets.Dataset.map
 
-    # lm_datasets = tokenized_datasets.map(
-    #     group_texts,
-    #     batched=True,
-    #     num_proc=args.preprocessing_num_workers,
-    #     load_from_cache_file=not args.overwrite_cache,
-    # )
+    lm_datasets = tokenized_datasets.map(
+        group_texts,
+        batched=True,
+        num_proc=args.preprocessing_num_workers,
+        load_from_cache_file=not args.overwrite_cache,
+    )
 
     # SPECIAL_TOKENS = {
     #     "pad_token": (" <pad>"),
@@ -405,31 +411,8 @@ def main():
 
     tokenizer.add_special_tokens(SPECIAL_TOKENS)
 
-    def custom_batching_collate_fn_00(batch):
-        result = tokenizer.batch_encode_plus([item["text"] + tokenizer.eos_token for item in batch], return_tensors="pt", padding="longest", truncation=True, max_length=512)
-
-        result["labels"] = result["input_ids"].detach().clone()
-        return result
-
-    def custom_batching_collate_fn(batch):
-        # result = tokenizer.batch_encode_plus([nfc_normalizer.normalize_str(item["text"]) for item in batch], padding="longest", truncation=True, max_length=511)
-        result = tokenizer.batch_encode_plus([nfc_normalizer.normalize_str(item["text"]) for item in batch], truncation=True, max_length=512)
-        min_len = min([len(item) for item in result["input_ids"]])
-        result["input_ids"] = torch.tensor([item[:min_len] for item in result["input_ids"]])
-        result["attention_mask"] = torch.tensor([item[:min_len] for item in result["attention_mask"]])
-
-        #import IPython 
-        #IPython.embed()
-
-        #result["input_ids"] = torch.cat((result["input_ids"], torch.tensor(tokenizer.eos_token_id).repeat(result["input_ids"].shape[0], 1)), dim=1)
-        #result["attention_mask"] = torch.cat((result["attention_mask"], torch.ones(result["attention_mask"].shape[0], 1)), dim=1)
-
-        result["labels"] = result["input_ids"].detach().clone()
-        return result
-
-
-    train_dataset = raw_datasets["train"]
-    eval_dataset = raw_datasets["validation"]
+    train_dataset = lm_datasets["train"]
+    eval_dataset = lm_datasets["validation"]
 
     # Log a few random samples from the training set:
     for index in random.sample(range(len(train_dataset)), 3):
@@ -438,10 +421,10 @@ def main():
 
     # DataLoaders creation:
     train_dataloader = DataLoader(
-        train_dataset, shuffle=False, collate_fn=custom_batching_collate_fn, batch_size=args.per_device_train_batch_size
+        train_dataset, shuffle=False, collate_fn=default_data_collator, batch_size=args.per_device_train_batch_size
     )
     eval_dataloader = DataLoader(
-        eval_dataset, collate_fn=custom_batching_collate_fn, batch_size=args.per_device_eval_batch_size
+        eval_dataset, collate_fn=default_data_collator, batch_size=args.per_device_eval_batch_size
     )
 
     count_pad = 0
